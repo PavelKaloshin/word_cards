@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Serbian Cards</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- HOME -->
+    <section class="screen" data-screen="home">
+      <header class="topbar">
+        <h1>Serbian Cards</h1>
+      </header>
+      <div id="resume-banner" class="resume-banner" hidden>
+        <button class="resume-btn" data-action="resume">
+          ▶ Продолжить начатую сессию <span id="resume-meta"></span>
+        </button>
+      </div>
+      <main class="home-grid">
+        <button class="bigbtn" data-action="learn">
+          <div class="bigbtn-title">Новые слова</div>
+          <div class="bigbtn-meta"><span id="count-new">0</span> доступно</div>
+          <div class="kbd">G</div>
+        </button>
+        <div class="review-wrap">
+          <button class="bigbtn" data-action="review">
+            <div class="bigbtn-title">Повтор</div>
+            <div class="bigbtn-meta"><span id="count-due">0</span> пора · <span id="count-total">0</span> всего</div>
+            <div class="kbd">R</div>
+          </button>
+          <div class="review-sizes">
+            <button class="size-chip" data-action="review-size" data-size="20" data-tip="20 слов">20</button>
+            <button class="size-chip" data-action="review-size" data-size="50" data-tip="50 слов">50</button>
+            <button class="size-chip" data-action="review-size" data-size="100" data-tip="100 слов">100</button>
+            <button class="size-chip" data-action="review-size" data-size="all" data-tip="Все доступные">∞</button>
+          </div>
+        </div>
+        <button class="bigbtn small" data-action="add">
+          Добавить слова <div class="kbd">A</div>
+        </button>
+        <button class="bigbtn small" data-action="settings">
+          Настройки <div class="kbd">,</div>
+        </button>
+        <button class="bigbtn small" data-action="history">
+          История сессий
+        </button>
+      </main>
+      <footer class="hint">? — справка по хоткеям</footer>
+    </section>
+
+    <!-- SESSION -->
+    <section class="screen" data-screen="session">
+      <div id="hud" class="hud">
+        <span class="hud-good">✓ <span id="hud-good">0</span></span>
+        <span class="hud-again">✗ <span id="hud-again">0</span></span>
+        <span class="hud-acc">acc <span id="hud-acc">0%</span></span>
+        <span class="hud-prog"><span id="hud-pos">0</span>/<span id="hud-total">0</span></span>
+        <span class="hud-mode" id="hud-mode"></span>
+      </div>
+
+      <div class="learn-panel" id="learn-panel" hidden>
+        <div class="learn-panel-head">
+          <h3>Прогресс по словам</h3>
+          <button class="back" data-action="toggle-learn-panel">Закрыть</button>
+        </div>
+        <div class="learn-panel-list" id="learn-panel-list"></div>
+      </div>
+
+      <main class="card-stage">
+        <div class="learn-progress-strip" id="learn-progress-strip" hidden>
+          <div class="progress-bar"><div class="progress-fill" id="learn-streak-fill"></div></div>
+          <div class="learn-progress-text">
+            <span id="learn-streak-text"></span>
+            <button class="hud-eye" data-action="toggle-learn-panel" data-tip="Подробно по словам">👁</button>
+          </div>
+        </div>
+        <div class="card" id="card">
+          <div class="card-image-wrap">
+            <img id="card-image" alt="">
+            <div class="image-spinner" id="image-spinner" hidden>
+              <div class="spinner"></div>
+              <div class="spinner-text" id="spinner-text">Ищу картинку…</div>
+            </div>
+          </div>
+          <div class="card-text-front" id="card-text-front">
+            <div class="card-front-main" id="card-front-main"></div>
+            <div class="hotkey-hint">
+              <span class="kbd">Пробел</span> перевернуть ·
+              после переворота: <span class="kbd">J</span> не угадал ·
+              <span class="kbd">K</span> сложно ·
+              <span class="kbd">L</span> угадал
+            </div>
+          </div>
+          <div class="card-text-back" id="card-text-back" hidden>
+            <div class="card-word" id="card-word"></div>
+            <div class="card-meta">
+              <div class="meta-row" id="meta-translation" hidden>
+                <span class="meta-label">→</span>
+                <span class="meta-text" id="text-translation"></span>
+              </div>
+              <div class="meta-row" id="meta-example" hidden>
+                <span class="meta-label">ex</span>
+                <span class="meta-text" id="text-example"></span>
+                <span class="meta-text small" id="text-example-translation"></span>
+              </div>
+            </div>
+            <div class="card-actions">
+              <button class="grade again" data-grade="again" data-tip="Не угадал — стрик обнуляется, слово вернётся скоро">Не угадал <span class="kbd">J</span></button>
+              <button class="grade hard"  data-grade="hard"  data-tip="Сложно — стрик растёт, но интервал укорочен ×0.5">Сложно <span class="kbd">K</span></button>
+              <button class="grade good"  data-grade="good"  data-tip="Угадал — стрик растёт, интервал увеличивается">Угадал <span class="kbd">L</span></button>
+            </div>
+          </div>
+        </div>
+        <div class="toolbar">
+          <button data-action="speak"              data-tip="Озвучить слово (TTS)">Озвучить <span class="kbd">S</span></button>
+          <button data-action="toggle-translation" data-tip="Показать/скрыть перевод">Перевод <span class="kbd">T</span></button>
+          <button data-action="toggle-example"     data-tip="Показать/скрыть пример с этим словом">Пример <span class="kbd">E</span></button>
+          <button data-action="regen-example"      data-tip="Сгенерировать новый пример через GPT">Новый пример <span class="kbd">⇧E</span></button>
+          <button data-action="refind-image"       data-tip="Поискать или сгенерировать другую картинку">Новая картинка <span class="kbd">R</span></button>
+          <button data-action="cycle-alphabet"     data-tip="Циклически: кириллица → латиница → оба">Алфавит <span class="kbd">C</span></button>
+          <button data-action="toggle-typing"      data-tip="Включить ввод слова с клавиатуры (вместо самооценки)">Ввод <span class="kbd">I</span></button>
+        </div>
+
+        <div class="typing-box" id="typing-box" hidden>
+          <input type="text" id="typing-input" placeholder="Введи слово на сербском (можно без диакритики)" autocomplete="off">
+          <div class="typing-result" id="typing-result"></div>
+        </div>
+      </main>
+
+      <button class="exit" data-action="exit-session">Esc</button>
+    </section>
+
+    <!-- ADD WORDS -->
+    <section class="screen" data-screen="add">
+      <header class="topbar">
+        <button class="back" data-action="back">← Esc</button>
+        <h1>Добавить слова</h1>
+      </header>
+      <main class="add-main">
+        <div class="add-tabs">
+          <button class="tab active" data-tab="list">Список</button>
+          <button class="tab" data-tab="screenshot">Скриншот</button>
+        </div>
+
+        <div class="add-pane" data-pane="list">
+          <p class="hint">Кидай что угодно: чистый список или копипасту из чата. GPT вытащит сербские слова, отбросит мусор. Если есть переводы рядом — подхватит.</p>
+          <textarea id="words-textarea" rows="14" placeholder="хлеб | bread&#10;Marija Ignjatovic ￼ (6 May 2026, 21:18)&#10;kuća&#10;pas"></textarea>
+          <div class="add-actions">
+            <button class="primary" data-action="parse-list">Извлечь через GPT</button>
+            <button class="back" data-action="parse-list-naive">Простой парсинг (по строкам)</button>
+            <span id="parse-status" class="hint"></span>
+          </div>
+        </div>
+
+        <div class="add-pane" data-pane="screenshot" hidden>
+          <p class="hint">Перетащи скриншот сюда или вставь из буфера (⌘V).</p>
+          <div class="dropzone" id="dropzone" tabindex="0">Drop / paste image</div>
+          <div id="ocr-status" class="hint"></div>
+        </div>
+
+        <div class="preview" id="preview" hidden>
+          <h2>Preview</h2>
+          <table class="preview-table">
+            <thead><tr><th></th><th>Сербское</th><th>Перевод</th></tr></thead>
+            <tbody id="preview-body"></tbody>
+          </table>
+          <div class="add-actions">
+            <button class="primary" data-action="save-words">Сохранить выбранные</button>
+            <span id="save-status" class="hint"></span>
+          </div>
+          <div id="add-progress" class="add-progress" hidden>
+            <div class="progress-text" id="progress-text"></div>
+            <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+            <details class="progress-cards" id="progress-cards" open>
+              <summary>Сгенерированные карточки <span id="cards-count" class="hint"></span></summary>
+              <div class="cards-grid" id="cards-grid"></div>
+            </details>
+            <div class="progress-log" id="progress-log"></div>
+          </div>
+        </div>
+      </main>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="screen" data-screen="settings">
+      <header class="topbar">
+        <button class="back" data-action="back">← Esc</button>
+        <h1>Настройки</h1>
+      </header>
+      <main class="settings-main" id="settings-main"></main>
+    </section>
+
+    <!-- HISTORY -->
+    <section class="screen" data-screen="history">
+      <header class="topbar">
+        <button class="back" data-action="back">← Esc</button>
+        <h1>История сессий</h1>
+      </header>
+      <main class="history-main" id="history-main"></main>
+    </section>
+
+    <!-- SESSION END -->
+    <section class="screen" data-screen="session-end">
+      <header class="topbar">
+        <h1>Сессия закончена</h1>
+      </header>
+      <main class="end-main" id="end-main"></main>
+    </section>
+
+    <!-- HOTKEY OVERLAY -->
+    <div class="overlay" id="hotkey-overlay" hidden>
+      <div class="overlay-card" id="overlay-content"></div>
+    </div>
+
+    <!-- TOAST -->
+    <div class="toast" id="toast" hidden></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

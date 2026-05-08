@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+data/words.json
+data/sessions.json
+data/active_sessions.json
+data/media/
+.DS_Store
+.vscode/
+.idea/
