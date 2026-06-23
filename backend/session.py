@@ -160,9 +160,11 @@ def answer(sess: Session, words_db, cfg: dict, grade: str) -> Optional[CurrentCa
     elif grade == "again":
         sess.again_count += 1
 
-    # Monotonic correct-count for the learn-mode progress bar
+    threshold = int(cfg.get("mastered_threshold", 3))
+
+    # Monotonic correct-count for the learn-mode progress bar.
+    # In learn mode this also drives the queue exit decision and new_mastered_ids.
     if sess.mode == "learn" and grade in ("good", "hard") and word_id in sess.learn_word_ids:
-        threshold = int(cfg.get("mastered_threshold", 3))
         cur = sess.learn_correct_count.get(word_id, 0)
         sess.learn_correct_count[word_id] = min(cur + 1, threshold)
 
@@ -170,17 +172,23 @@ def answer(sess: Session, words_db, cfg: dict, grade: str) -> Optional[CurrentCa
         {"word_id": word_id, "grade": grade, "direction": direction, "ts": scoring.now_iso()}
     )
 
-    is_mastered_now = scoring.is_mastered(word, cfg)
-    if is_mastered_now and not was_mastered:
-        sess.new_mastered_ids.add(word_id)
-
-    # Re-queue logic for learn mode
     if sess.mode == "learn":
-        if not is_mastered_now:
+        # Learn-mode completion is count-based (monotonic) — keeps HUD,
+        # progress bar, and queue exit consistent regardless of streak resets.
+        completed = (
+            word_id in sess.learn_word_ids
+            and sess.learn_correct_count.get(word_id, 0) >= threshold
+        )
+        if completed:
+            sess.new_mastered_ids.add(word_id)
+        else:
             _reinsert_learn(sess, word_id, grade)
-        # if mastered, don't re-queue
         _advance(sess, "forward")
     else:
+        # Review mode keeps streak-based mastery for stats / end-of-session summary.
+        is_mastered_now = scoring.is_mastered(word, cfg)
+        if is_mastered_now and not was_mastered:
+            sess.new_mastered_ids.add(word_id)
         _advance(sess, scoring.random_direction(cfg))
     return sess.current
 
