@@ -17,7 +17,18 @@ const state = {
   pendingPreview: null,     // for add-words flow
   refiningImage: new Set(), // word ids whose image is currently being refetched
   regenExample: new Set(),  // word ids whose example is currently being regenerated
+  classifying: new Set(),   // word ids whose pos/verb_group is being recomputed
+  conjugating: new Set(),   // word ids whose conjugations are being recomputed
   learnPanelOpen: false,
+};
+
+const PRONOUN_LABELS = {
+  '1sg': 'ja',
+  '2sg': 'ти',
+  '3sg': 'он/она',
+  '1pl': 'ми',
+  '2pl': 'ви',
+  '3pl': 'они/оне',
 };
 
 // ---- API helpers ----
@@ -117,19 +128,35 @@ function renderCard() {
   $('#hud-total').textContent = sess.hud.total;
   $('#hud-mode').textContent = sess.mode === 'learn' ? 'новые' : 'повтор';
 
-  // Learn-mode: monotonic progress strip above the card
+  // Progress strip above the card (both modes)
   const lp = sess.hud.learn_progress;
-  const showLearnHud = sess.mode === 'learn' && lp;
-  $('#learn-progress-strip').hidden = !showLearnHud;
-  if (showLearnHud) {
+  const strip = $('#learn-progress-strip');
+  const eyeBtn = strip.querySelector('.hud-eye');
+  if (sess.mode === 'learn' && lp) {
     const pct = lp.max_correct ? lp.total_correct / lp.max_correct * 100 : 0;
     $('#learn-streak-fill').style.width = pct.toFixed(1) + '%';
     $('#learn-streak-text').textContent =
       `${lp.total_correct} / ${lp.max_correct} правильных подряд · ` +
       `выучено ${lp.completed_words}/${lp.total_words} · ` +
       `осталось ${lp.remaining_words}`;
+    if (eyeBtn) eyeBtn.hidden = false;
+    strip.hidden = false;
     renderLearnPanel(lp);
+  } else if (sess.mode === 'review' && sess.hud.total > 0) {
+    const pos = sess.hud.position, tot = sess.hud.total;
+    const pct = tot ? pos / tot * 100 : 0;
+    $('#learn-streak-fill').style.width = pct.toFixed(1) + '%';
+    const acc = Math.round((sess.hud.accuracy || 0) * 100);
+    $('#learn-streak-text').textContent =
+      `${pos} / ${tot} карточек · ` +
+      `точность ${acc}% · ` +
+      `осталось ${tot - pos}`;
+    if (eyeBtn) eyeBtn.hidden = true;
+    strip.hidden = false;
+    state.learnPanelOpen = false;
+    $('#learn-panel').hidden = true;
   } else {
+    strip.hidden = true;
     state.learnPanelOpen = false;
     $('#learn-panel').hidden = true;
   }
@@ -174,6 +201,38 @@ function renderCard() {
 
   // Back: Serbian word under image
   $('#card-word').innerHTML = wordHtml(w);
+
+  // Verb group tag (under Serbian word on the back)
+  const verbTag = $('#verb-tag');
+  if (w.pos === 'verb' && w.verb_group) {
+    const isIrreg = w.verb_group === 'irregular';
+    verbTag.classList.toggle('irregular', isIrreg);
+    verbTag.innerHTML = isIrreg
+      ? `глагол · <span class="grp">неправильный</span>`
+      : `глагол · <span class="grp">${escape(w.verb_group)}</span> группа`;
+    verbTag.hidden = false;
+  } else {
+    verbTag.hidden = true;
+  }
+
+  // Verb-classification controls
+  const classifying = state.classifying.has(w.id);
+  const conjugating = state.conjugating.has(w.id);
+  $('#verb-spinner').hidden = !classifying;
+  $('#conj-spinner').hidden = !conjugating;
+  $$('#verb-controls .verb-btn').forEach(b => { b.disabled = classifying || conjugating; });
+  // Regen-conjugations button only relevant for verbs
+  $('#regen-conjugations-btn').hidden = !(w.pos === 'verb');
+
+  // Conjugation table — side panel; only when flipped and word is a verb
+  const cs = $('#conjugation-side');
+  const ct = $('#conjugation-table');
+  if (state.flipped && w.pos === 'verb' && w.conjugations) {
+    renderConjugationTable(ct, w.conjugations);
+    cs.hidden = false;
+  } else {
+    cs.hidden = true;
+  }
   $('#text-translation').textContent = w.translation || '(нет перевода)';
   $('#text-example').textContent = exampleForAlphabet(w);
   $('#text-example-translation').textContent = w.example_translation || '';
@@ -354,6 +413,219 @@ async function regenExample() {
     state.regenExample.delete(wordId);
     renderCard();
   }
+}
+
+function renderConjugationTable(table, conj) {
+  const order = ['1sg', '2sg', '3sg', '1pl', '2pl', '3pl'];
+  const rows = order.map(key => {
+    const e = conj[key] || {cyr: '', lat: ''};
+    let main, alt;
+    if (state.alphabet === 'cyr') { main = e.cyr || e.lat; alt = null; }
+    else if (state.alphabet === 'lat') { main = e.lat || e.cyr; alt = null; }
+    else { main = e.cyr || e.lat; alt = (e.lat && e.cyr) ? e.lat : null; }
+    // The form to speak: prefer Cyrillic if available (sr-RS voice handles both fine).
+    const speakText = e.cyr || e.lat;
+    const speakBtn = speakText
+      ? `<button class="tts-btn" data-tts-text="${escape(speakText)}" data-tip="Озвучить">🔊</button>`
+      : '';
+    return `<tr>
+      <td class="pronoun">${escape(PRONOUN_LABELS[key])}</td>
+      <td class="form">${escape(main || '—')}${alt ? `<span class="form-alt">${escape(alt)}</span>` : ''}</td>
+      <td class="tts-cell">${speakBtn}</td>
+    </tr>`;
+  }).join('');
+  table.querySelector('tbody').innerHTML = rows;
+}
+
+async function playTts(text) {
+  if (!text) return;
+  try {
+    const url = `/api/tts?text=${encodeURIComponent(text)}`;
+    const a = new Audio(url);
+    a.play().catch(e => toast('Не удалось проиграть: ' + e.message));
+  } catch (e) { toast('TTS ошибка: ' + e.message); }
+}
+
+async function deleteCurrentWord() {
+  const w = state.session?.card?.word;
+  if (!w) return;
+  const label = w.word_cyr ? `${w.word_cyr} / ${w.word_lat}` : w.word_lat;
+  if (!confirm(`Удалить слово «${label}» из словаря?\nДействие необратимо — картинка и аудио тоже удалятся.`)) {
+    return;
+  }
+  try {
+    await api('DELETE', `/api/words/${w.id}`);
+  } catch (e) {
+    toast('Не удалось удалить: ' + e.message);
+    return;
+  }
+  toast(`Удалено: ${w.word_lat}`);
+  // Advance the session past this card
+  if (state.session) {
+    try {
+      const sess = await api('POST', `/api/sessions/${state.session.id}/skip`);
+      state.session = sess;
+      state.flipped = false;
+      renderCard();
+    } catch (e) {
+      // Fall back: leave the session as-is; renderCard will probably finish it
+      console.error('skip after delete failed:', e);
+    }
+  }
+}
+
+async function regenConjugations() {
+  const w = state.session?.card?.word;
+  if (!w) return;
+  if (state.conjugating.has(w.id)) return;
+  const wordId = w.id;
+  state.conjugating.add(wordId);
+  renderCard();
+  try {
+    const updated = await api('POST', `/api/words/${wordId}/conjugate`);
+    if (state.session?.card?.word?.id === wordId) {
+      Object.assign(state.session.card.word, updated);
+      toast('Спряжение обновлено');
+    } else {
+      toast('Спряжение обновлено в фоне');
+    }
+  } catch (e) {
+    toast('Не удалось: ' + e.message);
+  } finally {
+    state.conjugating.delete(wordId);
+    renderCard();
+  }
+}
+
+async function classifyAsVerb() {
+  const w = state.session?.card?.word;
+  if (!w) return;
+  if (state.classifying.has(w.id)) return;
+  const wordId = w.id;
+  state.classifying.add(wordId);
+  renderCard();
+  try {
+    const updated = await api('POST', `/api/words/${wordId}/classify`);
+    if (state.session?.card?.word?.id === wordId) {
+      Object.assign(state.session.card.word, updated);
+      const grpMsg = updated.verb_group ? `группа ${updated.verb_group}` : 'не глагол по мнению модели';
+      toast(`Классифицировано: ${grpMsg}`);
+    } else {
+      toast('Классификация сохранена в фоне');
+    }
+  } catch (e) {
+    toast('Не удалось: ' + e.message);
+  } finally {
+    state.classifying.delete(wordId);
+    renderCard();
+  }
+}
+
+async function markNonVerb() {
+  const w = state.session?.card?.word;
+  if (!w) return;
+  if (state.classifying.has(w.id)) return;
+  const wordId = w.id;
+  state.classifying.add(wordId);
+  renderCard();
+  try {
+    const updated = await api('POST', `/api/words/${wordId}/mark-non-verb`);
+    if (state.session?.card?.word?.id === wordId) {
+      Object.assign(state.session.card.word, updated);
+      toast('Помечено: не глагол');
+    } else {
+      toast('Изменение сохранено в фоне');
+    }
+  } catch (e) {
+    toast('Не удалось: ' + e.message);
+  } finally {
+    state.classifying.delete(wordId);
+    renderCard();
+  }
+}
+
+async function _batchProcess({listUrl, itemUrl, action, formatOk, btnSelector, label}) {
+  let resp;
+  try {
+    resp = await api('GET', listUrl);
+  } catch (e) {
+    toast('Не удалось получить список: ' + e.message);
+    return;
+  }
+  const ids = resp.ids || [];
+  if (!ids.length) {
+    toast(`Нечего ${label.toLowerCase()}: список пуст`);
+    return;
+  }
+  const btn = $(btnSelector);
+  if (btn) btn.disabled = true;
+
+  const progress = $('#classify-progress');
+  const text = $('#classify-progress-text');
+  const fill = $('#classify-progress-fill');
+  const log = $('#classify-progress-log');
+  progress.hidden = false;
+  log.innerHTML = '';
+  fill.style.width = '0%';
+
+  const CONCURRENCY = 10;
+  let completed = 0;
+  let nextIdx = 0;
+  let done = 0;
+  let err = 0;
+  const inFlight = new Set();
+
+  function update() {
+    const flight = inFlight.size ? ` · в работе: ${inFlight.size}` : '';
+    text.textContent = `${label}: ${completed}/${ids.length} (готово ${done}${err ? `, ошибок ${err}` : ''})${flight}`;
+  }
+
+  async function worker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= ids.length) return;
+      const id = ids[i];
+      inFlight.add(id);
+      update();
+      try {
+        const r = await api('POST', itemUrl(id));
+        done++;
+        appendLog(log, formatOk(r), 'ok');
+      } catch (ex) {
+        err++;
+        appendLog(log, `✗ ${id.slice(0, 8)} — ${ex.message}`, 'err');
+      }
+      inFlight.delete(id);
+      completed++;
+      fill.style.width = `${(completed / ids.length * 100).toFixed(1)}%`;
+      update();
+    }
+  }
+  const wc = Math.min(CONCURRENCY, ids.length);
+  await Promise.all(Array.from({length: wc}, () => worker()));
+
+  text.textContent = `Готово. ${label}: ${done}${err ? `, ошибок ${err}` : ''}.`;
+  if (btn) btn.disabled = false;
+}
+
+function classifyAllMissing() {
+  return _batchProcess({
+    listUrl: '/api/words/unclassified',
+    itemUrl: id => `/api/words/${id}/classify`,
+    formatOk: r => `✓ ${r.word_lat} — ${r.pos || '?'}${r.verb_group ? ` (${r.verb_group})` : ''}`,
+    btnSelector: 'button[data-action="classify-all-missing"]',
+    label: 'Классификация',
+  });
+}
+
+function conjugateAllMissing() {
+  return _batchProcess({
+    listUrl: '/api/words/missing-conjugations',
+    itemUrl: id => `/api/words/${id}/conjugate`,
+    formatOk: r => `✓ ${r.word_lat} — 1sg: ${r.conjugations?.['1sg']?.cyr || r.conjugations?.['1sg']?.lat || '?'}`,
+    btnSelector: 'button[data-action="conjugate-all-missing"]',
+    label: 'Спряжения',
+  });
 }
 
 async function refindImage() {
@@ -584,6 +856,7 @@ const SETTINGS_DEFS = [
   { key: 'tts_voice', label: 'TTS голос', type: 'text' },
   { key: 'openai_model_text', label: 'OpenAI модель (текст)', type: 'text' },
   { key: 'openai_model_vision', label: 'OpenAI модель (vision)', type: 'text' },
+  { key: 'openai_model_extract', label: 'OpenAI модель (извлечение/перевод)', type: 'text' },
   { key: 'image_search_lang', label: 'Язык для поиска картинок (Wiki)', type: 'text' },
   { key: 'default_alphabet_view', label: 'Алфавит по умолчанию (cyr/lat/both)', type: 'text' },
 ];
@@ -796,6 +1069,12 @@ function bindActions() {
       case 'toggle-example': toggleExample(); break;
       case 'regen-example': regenExample(); break;
       case 'refind-image': refindImage(); break;
+      case 'classify-as-verb': classifyAsVerb(); break;
+      case 'mark-non-verb': markNonVerb(); break;
+      case 'regen-conjugations': regenConjugations(); break;
+      case 'delete-word': deleteCurrentWord(); break;
+      case 'classify-all-missing': classifyAllMissing(); break;
+      case 'conjugate-all-missing': conjugateAllMissing(); break;
       case 'toggle-learn-panel': toggleLearnPanel(); break;
       case 'cycle-alphabet': cycleAlphabet(); break;
       case 'toggle-typing': toggleTyping(); break;
@@ -809,6 +1088,13 @@ function bindActions() {
   $('#card').addEventListener('click', (ev) => {
     if (ev.target.closest('.grade')) return;
     if (!state.flipped) flip();
+  });
+  // TTS click delegation (works for any [data-tts-text] button)
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-tts-text]');
+    if (!btn) return;
+    ev.stopPropagation();
+    playTts(btn.dataset.ttsText);
   });
   // grade clicks
   $$('.grade').forEach(b => b.addEventListener('click', () => answer(b.dataset.grade)));

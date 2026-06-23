@@ -76,6 +76,7 @@
             <button class="hud-eye" data-action="toggle-learn-panel" data-tip="Подробно по словам">👁</button>
           </div>
         </div>
+        <div class="card-row">
         <div class="card" id="card">
           <div class="card-image-wrap">
             <img id="card-image" alt="">
@@ -95,6 +96,15 @@
           </div>
           <div class="card-text-back" id="card-text-back" hidden>
             <div class="card-word" id="card-word"></div>
+            <div class="verb-tag" id="verb-tag" hidden></div>
+            <div class="verb-controls" id="verb-controls">
+              <button class="verb-btn" data-action="classify-as-verb" data-tip="Это глагол — определить или переопределить группу">Глагол</button>
+              <button class="verb-btn" data-action="mark-non-verb" data-tip="Это не глагол — убрать классификацию">Не глагол</button>
+              <button class="verb-btn" data-action="regen-conjugations" id="regen-conjugations-btn" data-tip="Сгенерировать таблицу спряжений заново" hidden>↻ спряжение</button>
+              <span class="verb-spinner" id="verb-spinner" hidden>классифицирую…</span>
+              <span class="verb-spinner" id="conj-spinner" hidden>спрягаю…</span>
+              <button class="verb-btn delete-word-btn" data-action="delete-word" data-tip="Удалить это слово из словаря (необратимо)">🗑 Удалить</button>
+            </div>
             <div class="card-meta">
               <div class="meta-row" id="meta-translation" hidden>
                 <span class="meta-label">→</span>
@@ -113,6 +123,12 @@
             </div>
           </div>
         </div>
+        <aside class="conjugation-side" id="conjugation-side" hidden>
+          <table class="conjugation-table" id="conjugation-table">
+            <tbody></tbody>
+          </table>
+        </aside>
+        </div><!-- /card-row -->
         <div class="toolbar">
           <button data-action="speak"              data-tip="Озвучить слово (TTS)">Озвучить <span class="kbd">S</span></button>
           <button data-action="toggle-translation" data-tip="Показать/скрыть перевод">Перевод <span class="kbd">T</span></button>
@@ -189,7 +205,18 @@
         <button class="back" data-action="back">← Esc</button>
         <h1>Настройки</h1>
       </header>
-      <main class="settings-main" id="settings-main"></main>
+      <main class="settings-main">
+        <div class="settings-actions">
+          <button class="primary" data-action="classify-all-missing">Классифицировать незаклассифицированные</button>
+          <button class="primary" data-action="conjugate-all-missing">Сгенерировать спряжения для глаголов без таблицы</button>
+        </div>
+        <div id="classify-progress" class="add-progress" hidden>
+          <div class="progress-text" id="classify-progress-text"></div>
+          <div class="progress-bar"><div class="progress-fill" id="classify-progress-fill"></div></div>
+          <div class="progress-log" id="classify-progress-log"></div>
+        </div>
+        <div id="settings-main"></div>
+      </main>
     </section>
 
     <!-- HISTORY -->

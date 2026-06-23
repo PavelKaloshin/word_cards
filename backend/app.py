@@ -71,6 +71,9 @@ def _word_skeleton(serbian: str, translation: Optional[str], note: Optional[str]
         "image_hash_history": [],
         "audio_path": "",
         "note": note or "",
+        "pos": "",
+        "verb_group": "",
+        "conjugations": None,
         "created_at": scoring.now_iso(),
         "last_seen_at": None,
         "last_correct_at": None,
@@ -176,7 +179,8 @@ def _enrich_word(word: dict, cfg: dict) -> None:
     serbian_for_prompts = word["word_cyr"]
     needs_translation = not word.get("translation")
     needs_example = not word.get("example_cyr")
-    if needs_translation or needs_example:
+    needs_pos = not word.get("pos")
+    if needs_translation or needs_example or needs_pos:
         try:
             data = llm.generate_translation_and_example(serbian_for_prompts, cfg)
             if needs_translation:
@@ -184,8 +188,20 @@ def _enrich_word(word: dict, cfg: dict) -> None:
             word["example_cyr"] = data.get("example_cyr", word.get("example_cyr", ""))
             word["example_lat"] = data.get("example_lat", word.get("example_lat", ""))
             word["example_translation"] = data.get("example_translation", word.get("example_translation", ""))
+            if needs_pos:
+                word["pos"] = data.get("pos", "")
+                word["verb_group"] = data.get("verb_group", "")
         except Exception as e:
             log.warning("text-gen failed for %s: %s", serbian_for_prompts, e)
+
+    # Conjugations for verbs
+    if word.get("pos") == "verb" and not word.get("conjugations"):
+        try:
+            conj = llm.generate_conjugations(word["word_lat"], word.get("translation", ""), cfg)
+            if conj:
+                word["conjugations"] = conj
+        except Exception as e:
+            log.warning("conjugations failed for %s: %s", serbian_for_prompts, e)
 
     if not word.get("image_path"):
         stem = cfg_mod.IMAGES_DIR / word["id"]
@@ -271,6 +287,150 @@ def add_words(req: AddWordsRequest):
     return {"added": added, "skipped": skipped}
 
 
+@app.post("/api/words/{word_id}/classify")
+def classify_one_word(word_id: str):
+    """Re-classify a single word's pos / verb_group. If newly classified as verb,
+    also generate the conjugation table."""
+    cfg = get_cfg()
+    w = words_db.get(word_id)
+    if not w:
+        raise HTTPException(404, "word not found")
+    entries = [{"word_lat": w.get("word_lat", ""), "translation": w.get("translation", "")}]
+    try:
+        results = llm.classify_words(entries, cfg)
+    except Exception as e:
+        raise HTTPException(500, f"classification failed: {e}")
+    if not results:
+        raise HTTPException(500, "empty classification result")
+    r = results[0]
+    was_verb = w.get("pos") == "verb"
+    w["pos"] = r.get("pos", "")
+    w["verb_group"] = r.get("verb_group", "")
+    if w["pos"] == "verb":
+        # Generate conjugations if newly verb or missing
+        if not was_verb or not w.get("conjugations"):
+            try:
+                conj = llm.generate_conjugations(w.get("word_lat", ""), w.get("translation", ""), cfg)
+                if conj:
+                    w["conjugations"] = conj
+            except Exception as e:
+                log.warning("conjugation regen failed: %s", e)
+    else:
+        w["conjugations"] = None
+    words_db.update(word_id, w)
+    return _to_api(w)
+
+
+@app.post("/api/words/{word_id}/mark-non-verb")
+def mark_non_verb(word_id: str):
+    """User explicitly marks a misclassified verb as non-verb."""
+    w = words_db.get(word_id)
+    if not w:
+        raise HTTPException(404, "word not found")
+    # Use "other" so a future classify pass doesn't override; user-set wins.
+    w["pos"] = "other"
+    w["verb_group"] = ""
+    w["conjugations"] = None  # stale if it was previously a verb
+    words_db.update(word_id, w)
+    return _to_api(w)
+
+
+@app.get("/api/words/unclassified")
+def list_unclassified():
+    """IDs of words missing `pos`. Frontend can drive a per-word loop with progress."""
+    ids = [w["id"] for w in words_db.all() if not w.get("pos")]
+    return {"ids": ids, "count": len(ids)}
+
+
+@app.get("/api/tts")
+def tts_for_text(text: str = ""):
+    """On-demand TTS for arbitrary Serbian text. Caches by md5(voice+text)."""
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(400, "empty text")
+    cfg = get_cfg()
+    voice = cfg.get("tts_voice", "sr-RS-NicholasNeural")
+    key = hashlib.md5(f"{voice}::{text}".encode("utf-8")).hexdigest()
+    cache_dir = cfg_mod.MEDIA_DIR / "tts_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"{key}.mp3"
+    if not cache_file.exists():
+        try:
+            tts.synthesize(text, voice, cache_file)
+        except Exception as e:
+            log.warning("on-demand TTS failed for %r: %s", text, e)
+            raise HTTPException(500, f"TTS failed: {e}")
+    return FileResponse(str(cache_file), media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/words/missing-conjugations")
+def list_missing_conjugations():
+    """IDs of verbs lacking conjugation tables."""
+    ids = [
+        w["id"]
+        for w in words_db.all()
+        if w.get("pos") == "verb" and not w.get("conjugations")
+    ]
+    return {"ids": ids, "count": len(ids)}
+
+
+@app.post("/api/words/{word_id}/conjugate")
+def conjugate_one(word_id: str):
+    """Generate / regenerate the present-tense conjugation table for one verb."""
+    cfg = get_cfg()
+    w = words_db.get(word_id)
+    if not w:
+        raise HTTPException(404, "word not found")
+    try:
+        conj = llm.generate_conjugations(w.get("word_lat", ""), w.get("translation", ""), cfg)
+    except Exception as e:
+        raise HTTPException(500, f"conjugation failed: {e}")
+    if not conj:
+        raise HTTPException(500, "empty conjugation result")
+    w["conjugations"] = conj
+    words_db.update(word_id, w)
+    return _to_api(w)
+
+
+@app.post("/api/words/classify-missing")
+def classify_missing(force: bool = False):
+    """
+    Backfill `pos` and `verb_group`. With force=true, re-classifies ALL words
+    (useful after prompt improvements). Otherwise only words missing `pos`.
+    Batches in chunks of 30.
+    """
+    cfg = get_cfg()
+    targets = words_db.all() if force else [w for w in words_db.all() if not w.get("pos")]
+    if not targets:
+        return {"classified": 0, "remaining": 0, "total": 0}
+    CHUNK = 30
+    classified = 0
+    for i in range(0, len(targets), CHUNK):
+        chunk = targets[i : i + CHUNK]
+        entries = [
+            {"word_lat": w.get("word_lat", ""), "translation": w.get("translation", "")}
+            for w in chunk
+        ]
+        try:
+            results = llm.classify_words(entries, cfg)
+        except Exception as e:
+            log.warning("classify batch failed: %s", e)
+            continue
+        for w, r in zip(chunk, results):
+            if not isinstance(r, dict):
+                continue
+            pos = r.get("pos", "")
+            verb_group = r.get("verb_group", "")
+            if not pos:
+                continue
+            w["pos"] = pos
+            w["verb_group"] = verb_group
+            words_db.update(w["id"], w)
+            classified += 1
+    remaining = sum(1 for w in words_db.all() if not w.get("pos"))
+    return {"classified": classified, "remaining": remaining, "total": len(targets)}
+
+
 @app.post("/api/words/parse-text")
 def parse_text(req: ParseTextRequest):
     cfg = get_cfg()
@@ -346,6 +506,25 @@ def delete_word(word_id: str):
             except Exception:
                 pass
     words_db.delete(word_id)
+    # Scrub from active sessions so progress bars / queues stay consistent
+    changed = False
+    for sess in active_sessions.values():
+        if word_id in sess.queue:
+            sess.queue = [x for x in sess.queue if x != word_id]
+            changed = True
+        if word_id in sess.learn_word_ids:
+            sess.learn_word_ids = [x for x in sess.learn_word_ids if x != word_id]
+            sess.learn_initial_total = len(sess.learn_word_ids)
+            changed = True
+        if word_id in sess.learn_correct_count:
+            sess.learn_correct_count.pop(word_id, None)
+            changed = True
+        if word_id in sess.new_mastered_ids:
+            sess.new_mastered_ids.discard(word_id)
+            changed = True
+    if changed:
+        for sess in active_sessions.values():
+            session_store.put(sess)
     return {"ok": True}
 
 
@@ -475,6 +654,21 @@ def answer_session(session_id: str, req: AnswerRequest):
         raise HTTPException(400, "no current card")
     sess_mod.answer(sess, words_db, cfg, req.grade)
     session_store.put(sess)
+    return _session_state(sess)
+
+
+@app.post("/api/sessions/{session_id}/skip")
+def skip_card(session_id: str):
+    """Advance past the current card without grading.
+    Used after the underlying word is deleted from the dictionary."""
+    cfg = get_cfg()
+    sess = active_sessions.get(session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if sess.current is not None:
+        direction = "forward" if sess.mode == "learn" else scoring.random_direction(cfg)
+        sess_mod._advance(sess, direction)
+        session_store.put(sess)
     return _session_state(sess)
 
 
