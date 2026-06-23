@@ -1,0 +1,15 @@
+disabled_rules:
+  - inclusive_language
+  - trailing_comma
+  - identifier_name
+  - force_try
+  - line_length
+  - file_length
+  - type_body_length
+  - for_where
+  - function_body_length
+  - cyclomatic_complexity
+
+included:
+  - SerbianCards
+  - SerbianCardsTests
