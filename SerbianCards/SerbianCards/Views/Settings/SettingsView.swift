@@ -84,13 +84,25 @@ struct SettingsView: View {
                         get: { config.alwaysRegenerateExample },
                         set: { config.alwaysRegenerateExample = $0; save() }
                     ))
-                    TextRow(
-                        label: "OpenAI Text Model",
-                        value: Binding(get: { config.openaiModelText }, set: { config.openaiModelText = $0; save() })
+                    ModelPicker(
+                        label: "Text Model",
+                        selection: Binding(get: { config.openaiModelText }, set: { config.openaiModelText = $0; save() }),
+                        options: Self.textModelOptions
                     )
-                    TextRow(
-                        label: "OpenAI Vision Model",
-                        value: Binding(get: { config.openaiModelVision }, set: { config.openaiModelVision = $0; save() })
+                    ModelPicker(
+                        label: "Vision Model",
+                        selection: Binding(get: { config.openaiModelVision }, set: { config.openaiModelVision = $0; save() }),
+                        options: Self.textModelOptions
+                    )
+                    ModelPicker(
+                        label: "Extract Model",
+                        selection: Binding(get: { config.openaiModelExtract }, set: { config.openaiModelExtract = $0; save() }),
+                        options: Self.fullModelOptions
+                    )
+                    ModelPicker(
+                        label: "Image Model",
+                        selection: Binding(get: { config.openaiModelImage }, set: { config.openaiModelImage = $0; save() }),
+                        options: Self.imageModelOptions
                     )
                     TextRow(
                         label: "Image Search Language",
@@ -193,6 +205,18 @@ struct SettingsView: View {
         }
     }
 
+    static let textModelOptions = [
+        "gpt-5.4-mini", "gpt-5.4", "gpt-4.1-mini", "gpt-4.1", "gpt-4.1-nano",
+    ]
+
+    static let fullModelOptions = [
+        "gpt-5.4", "gpt-5.4-mini", "gpt-4.1", "gpt-4.1-mini",
+    ]
+
+    static let imageModelOptions = [
+        "gpt-image-2", "dall-e-3", "dall-e-2",
+    ]
+
     private func save() {
         try? modelContext.save()
     }
@@ -291,6 +315,23 @@ struct DoubleSlider: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: $value, in: range, step: step)
+        }
+    }
+}
+
+struct ModelPicker: View {
+    let label: String
+    @Binding var selection: String
+    let options: [String]
+
+    var body: some View {
+        Picker(label, selection: $selection) {
+            ForEach(options, id: \.self) { model in
+                Text(model).tag(model)
+            }
+            if !options.contains(selection) {
+                Text(selection).tag(selection)
+            }
         }
     }
 }

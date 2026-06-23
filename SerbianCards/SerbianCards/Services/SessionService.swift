@@ -90,11 +90,12 @@ enum SessionService {
         case .again: session.againCount += 1
         }
 
+        let threshold = config.masteredThreshold
+
         // Monotonic correct-count for learn-mode progress bar
         if session.mode == .learn,
            grade == .good || grade == .hard,
            session.learnWordIds.contains(wordId) {
-            let threshold = config.masteredThreshold
             let cur = session.learnCorrectCount[wordId] ?? 0
             session.learnCorrectCount[wordId] = min(cur + 1, threshold)
         }
@@ -106,18 +107,23 @@ enum SessionService {
             ts: ScoringService.nowISO()
         ))
 
-        let isMasteredNow = ScoringService.isMastered(word: word, config: config)
-        if isMasteredNow && !wasMastered {
-            session.newMasteredIds.insert(wordId)
-        }
-
-        // Re-queue logic for learn mode
         if session.mode == .learn {
-            if !isMasteredNow {
+            // Learn-mode completion is count-based (monotonic) — keeps HUD,
+            // progress bar, and queue exit consistent regardless of streak resets.
+            let completed = session.learnWordIds.contains(wordId)
+                && (session.learnCorrectCount[wordId] ?? 0) >= threshold
+            if completed {
+                session.newMasteredIds.insert(wordId)
+            } else {
                 reinsertLearn(session, wordId: wordId, grade: grade)
             }
             advance(session, direction: .forward)
         } else {
+            // Review mode keeps streak-based mastery for stats / end-of-session summary.
+            let isMasteredNow = ScoringService.isMastered(word: word, config: config)
+            if isMasteredNow && !wasMastered {
+                session.newMasteredIds.insert(wordId)
+            }
             advance(session, direction: ScoringService.randomDirection(config: config))
         }
 

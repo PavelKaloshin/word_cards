@@ -99,6 +99,80 @@ final class AddWordsFlowTests: XCTestCase {
         XCTAssertEqual(entries[2].1, "")
     }
 
+    /// Replicates the exact save flow from AddWordsView:
+    /// insert skeletons → save → verify fetch → simulate navigating to HomeView
+    func testSkeletonSavePersistsAcrossContexts() throws {
+        // Step 1: Insert skeletons (same as saveSelectedWords)
+        let words = ["ljubav", "kuća", "hleb"]
+        var inserted: [WordEntry] = []
+        for w in words {
+            let (cyr, lat) = NormalizeService.toBoth(w)
+            let word = WordEntry(wordCyr: cyr, wordLat: lat, translation: "")
+            context.insert(word)
+            inserted.append(word)
+        }
+
+        // Verify pending state
+        XCTAssertTrue(context.hasChanges, "Context should have pending changes after insert")
+        XCTAssertEqual(context.insertedModelsArray.count, 3, "Should have 3 pending inserts")
+
+        // Step 2: Save
+        try context.save()
+
+        // Step 3: Fetch from SAME context (what AddWordsView does for verification)
+        let sameContextCount = try context.fetch(FetchDescriptor<WordEntry>()).count
+        XCTAssertEqual(sameContextCount, 3, "Same context should see 3 words after save")
+
+        // Step 4: Fetch from a NEW context (simulates HomeView's @Query using a different context)
+        let otherContext = ModelContext(container)
+        let otherContextCount = try otherContext.fetch(FetchDescriptor<WordEntry>()).count
+        XCTAssertEqual(otherContextCount, 3, "New context should also see 3 words after save")
+    }
+
+    /// Test using container.mainContext (what @Environment(\.modelContext) provides)
+    @MainActor
+    func testSkeletonSaveViaMainContext() throws {
+        let mainCtx = container.mainContext
+
+        let words = ["ljubav", "kuća", "hleb"]
+        for w in words {
+            let (cyr, lat) = NormalizeService.toBoth(w)
+            let word = WordEntry(wordCyr: cyr, wordLat: lat, translation: "")
+            mainCtx.insert(word)
+        }
+
+        let pendingInserts = mainCtx.insertedModelsArray.count
+        XCTAssertEqual(pendingInserts, 3, "mainContext should have 3 pending inserts")
+
+        try mainCtx.save()
+
+        let count = try mainCtx.fetch(FetchDescriptor<WordEntry>()).count
+        XCTAssertEqual(count, 3, "mainContext should see 3 words after save")
+
+        // Also verify from a separate context
+        let freshCtx = ModelContext(container)
+        let freshCount = try freshCtx.fetch(FetchDescriptor<WordEntry>()).count
+        XCTAssertEqual(freshCount, 3, "Fresh context should see 3 words persisted by mainContext")
+    }
+
+    /// Test saving from async Task (replicates Task { await saveSelectedWords() })
+    @MainActor
+    func testSkeletonSaveFromAsyncTask() async throws {
+        let mainCtx = container.mainContext
+
+        // Simulate the Task-based save flow
+        let words = ["ljubav", "kuća"]
+        for w in words {
+            let (cyr, lat) = NormalizeService.toBoth(w)
+            let word = WordEntry(wordCyr: cyr, wordLat: lat, translation: "")
+            mainCtx.insert(word)
+        }
+        try mainCtx.save()
+
+        let count = try mainCtx.fetch(FetchDescriptor<WordEntry>()).count
+        XCTAssertEqual(count, 2, "Words should persist when saved from async context")
+    }
+
     func testNaiveLineParsingStripsNumbering() {
         let numberPrefix = /^\d+[\.\)\-]\s*/
 

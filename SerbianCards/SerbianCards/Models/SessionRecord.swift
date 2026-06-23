@@ -30,12 +30,15 @@ struct HardestWord: Codable, Equatable, Identifiable {
 
 @Model
 final class SessionRecord {
-    @Attribute(.unique) var id: String
-    var mode: String
-    var startedAt: String
+    @Attribute(.unique) var id: String = UUID().uuidString
+    var mode: String = "learn"
+    var startedAt: String = ISO8601DateFormatter().string(from: Date())
     var endedAt: String?
-    var results: [SessionResult]
-    var summary: SessionSummary
+    var results: [SessionResult] = []
+    var summary: SessionSummary = SessionSummary(
+        shown: 0, good: 0, hard: 0, again: 0,
+        accuracy: 0, newMastered: 0, hardest: []
+    )
 
     init(
         id: String = UUID().uuidString,

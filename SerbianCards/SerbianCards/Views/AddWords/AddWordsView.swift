@@ -20,6 +20,8 @@ struct AddWordsView: View {
     @State private var saveProgress: Double = 0
     @State private var saveStatusText: String = ""
     @State private var savedWords: [WordEntry] = []
+    @State private var savingWords: [SavingWord] = []
+    @State private var enrichmentTask: Task<Void, Never>?
 
     // Photo picker
     @State private var selectedPhotoItem: PhotosPickerItem?
@@ -176,7 +178,7 @@ struct AddWordsView: View {
             // Save button with progress
             VStack(spacing: 8) {
                 Button {
-                    Task { await saveSelectedWords() }
+                    enrichmentTask = Task { await saveSelectedWords() }
                 } label: {
                     if isSaving {
                         ProgressView()
@@ -189,13 +191,52 @@ struct AddWordsView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(isSaving || previewEntries.filter(\.isSelected).isEmpty)
 
-                if isSaving {
-                    ProgressView(value: saveProgress)
-                    Text(saveStatusText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if !savingWords.isEmpty {
+                    VStack(spacing: 4) {
+                        ProgressView(value: saveProgress)
+                        Text(saveStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(savingWords) { item in
+                            HStack(spacing: 6) {
+                                statusIcon(item.status)
+                                Text(item.word)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                Spacer()
+                                statusLabel(item.status)
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func statusIcon(_ status: SaveWordStatus) -> some View {
+        switch status {
+        case .pending:
+            Image(systemName: "circle").foregroundStyle(.secondary).font(.caption2)
+        case .saved:
+            Image(systemName: "checkmark.circle").foregroundStyle(.blue).font(.caption2)
+        case .enriching:
+            ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+        case .done:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.caption2)
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red).font(.caption2)
+        }
+    }
+
+    @ViewBuilder
+    private func statusLabel(_ status: SaveWordStatus) -> some View {
+        switch status {
+        case .pending: Text("pending").font(.caption2).foregroundStyle(.secondary)
+        case .saved: Text("saved").font(.caption2).foregroundStyle(.blue)
+        case .enriching: Text("enriching...").font(.caption2).foregroundStyle(.orange)
+        case .done: Text("done").font(.caption2).foregroundStyle(.green)
+        case .failed(let msg): Text(msg).font(.caption2).foregroundStyle(.red).lineLimit(1)
         }
     }
 
@@ -343,94 +384,100 @@ struct AddWordsView: View {
         savedWords = []
         let config = loadConfig()
 
-        await withTaskGroup(of: WordEntry?.self) { group in
-            let maxConcurrency = 10
-            var iterator = selected.makeIterator()
-            var running = 0
-            var completed = 0
-
-            func addNextTask() -> Bool {
-                guard let entry = iterator.next() else { return false }
-                group.addTask {
-                    return await self.enrichAndSaveWord(entry: entry, config: config)
-                }
-                running += 1
-                return true
-            }
-
-            // Start initial batch
-            for _ in 0..<min(maxConcurrency, selected.count) {
-                if !addNextTask() { break }
-            }
-
-            for await result in group {
-                completed += 1
-                running -= 1
-                await MainActor.run {
-                    saveProgress = Double(completed) / Double(selected.count)
-                    saveStatusText = "\(completed)/\(selected.count)"
-                    if let word = result {
-                        savedWords.append(word)
-                    }
-                }
-                _ = addNextTask()
-            }
+        // Step 1: Save all skeletons to SwiftData immediately
+        var wordEntries: [WordEntry] = []
+        var trackingItems: [SavingWord] = []
+        for entry in selected {
+            let (cyr, lat) = NormalizeService.toBoth(entry.word)
+            let word = WordEntry(wordCyr: cyr, wordLat: lat, translation: entry.translation)
+            modelContext.insert(word)
+            wordEntries.append(word)
+            trackingItems.append(SavingWord(id: word.id, word: entry.word, status: .saved))
         }
-
-        await MainActor.run {
+        do {
+            try modelContext.save()
+        } catch {
+            parseStatus = "Save failed: \(error.localizedDescription)"
             isSaving = false
-            showPreview = false
-            textInput = ""
-            appState.showToast("Added: \(savedWords.count)")
+            return
         }
+        savingWords = trackingItems
+        saveStatusText = "Saved \(selected.count) words, enriching..."
+
+        // Step 2: Enrich each word via individual Tasks (inherits @MainActor,
+        // so @Model access is safe; network awaits free the main actor for UI)
+        var enrichTasks: [(WordEntry, Task<Void, Never>)] = []
+        for word in wordEntries {
+            let task = Task {
+                await self.enrichWord(word: word, config: config)
+            }
+            enrichTasks.append((word, task))
+        }
+
+        var completed = 0
+        for (word, task) in enrichTasks {
+            await task.value
+            completed += 1
+            saveProgress = Double(completed) / Double(selected.count)
+            saveStatusText = "\(completed)/\(selected.count) enriched"
+            savedWords.append(word)
+            if let i = savingWords.firstIndex(where: { $0.id == word.id }) {
+                if case .failed = savingWords[i].status {
+                    // keep failed status
+                } else {
+                    savingWords[i].status = .done
+                }
+            }
+        }
+
+        isSaving = false
+        showPreview = false
+        textInput = ""
+        appState.showToast("Added: \(savedWords.count)")
     }
 
-    private func enrichAndSaveWord(entry: PreviewEntry, config: AppConfig) async -> WordEntry? {
-        let (cyr, lat) = NormalizeService.toBoth(entry.word)
-        let word = WordEntry(
-            wordCyr: cyr,
-            wordLat: lat,
-            translation: entry.translation
-        )
+    private func enrichWord(word: WordEntry, config: AppConfig) async {
+        if let i = savingWords.firstIndex(where: { $0.id == word.id }) {
+            savingWords[i].status = .enriching
+        }
 
-        // Enrich with OpenAI
-        let needsTranslation = word.translation.isEmpty
-        let needsExample = word.exampleCyr.isEmpty
+        do {
+            let needsTranslation = word.translation.isEmpty
+            let result = try await OpenAIService.shared.generateTranslationAndExample(
+                word: word.wordCyr, config: config
+            )
+            if needsTranslation { word.translation = result.translation }
+            word.exampleCyr = result.exampleCyr
+            word.exampleLat = result.exampleLat
+            word.exampleTranslation = result.exampleTranslation
+            word.pos = result.pos
+            word.verbGroup = result.verbGroup
+            try? modelContext.save()
 
-        if needsTranslation || needsExample {
-            do {
-                let result = try await OpenAIService.shared.generateTranslationAndExample(
-                    word: cyr, config: config
-                )
-                if needsTranslation {
-                    word.translation = result.translation
+            if result.pos == "verb" {
+                if let conj = try? await OpenAIService.shared.generateConjugations(
+                    wordLat: word.wordLat, translation: word.translation, config: config
+                ) {
+                    word.conjugations = conj
+                    try? modelContext.save()
                 }
-                word.exampleCyr = result.exampleCyr
-                word.exampleLat = result.exampleLat
-                word.exampleTranslation = result.exampleTranslation
-            } catch {
-                // Continue without enrichment
+            }
+        } catch {
+            if let i = savingWords.firstIndex(where: { $0.id == word.id }) {
+                savingWords[i].status = .failed("enrichment failed")
             }
         }
 
-        // Search for image
         if let path = await ImageSearchService.shared.searchAndSave(
-            wordSerbian: lat,
+            wordSerbian: word.wordLat,
             translation: word.translation,
             wordId: word.id,
             config: config,
             evalEnabled: config.imageEvalEnabled
         ) {
             word.imagePath = path
-        }
-
-        // Insert into SwiftData on main actor
-        await MainActor.run {
-            modelContext.insert(word)
             try? modelContext.save()
         }
-
-        return word
     }
 
     private func loadConfig() -> AppConfig {
@@ -447,6 +494,20 @@ struct PreviewEntry: Identifiable {
     var translation: String
     var isDuplicate: Bool
     var isSelected: Bool
+}
+
+enum SaveWordStatus: Equatable {
+    case pending
+    case saved
+    case enriching
+    case done
+    case failed(String)
+}
+
+struct SavingWord: Identifiable {
+    let id: String
+    let word: String
+    var status: SaveWordStatus
 }
 
 // MARK: - Camera view

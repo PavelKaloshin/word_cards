@@ -62,6 +62,27 @@ struct ContentView: View {
             let config = AppConfig()
             modelContext.insert(config)
             try? modelContext.save()
+        } else if let config = existing.first {
+            migrateStaleModelNames(config)
         }
+    }
+
+    private static let modelRenames: [String: String] = [
+        "gpt-4o-mini": "gpt-5.4-mini",
+        "gpt-4o": "gpt-5.4",
+        "gpt-4-turbo": "gpt-4.1",
+        "gpt-4": "gpt-4.1",
+        "dall-e-3": "gpt-image-2",
+    ]
+
+    private func migrateStaleModelNames(_ config: AppConfig) {
+        var changed = false
+        for (old, new) in Self.modelRenames {
+            if config.openaiModelText == old { config.openaiModelText = new; changed = true }
+            if config.openaiModelVision == old { config.openaiModelVision = new; changed = true }
+            if config.openaiModelExtract == old { config.openaiModelExtract = new; changed = true }
+            if config.openaiModelImage == old { config.openaiModelImage = new; changed = true }
+        }
+        if changed { try? modelContext.save() }
     }
 }

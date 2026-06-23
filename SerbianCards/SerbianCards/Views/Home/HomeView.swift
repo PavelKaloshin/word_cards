@@ -80,6 +80,7 @@ struct HomeView: View {
             }
             .navigationTitle("Serbian Cards")
             .onAppear { loadStats() }
+            .onChange(of: words.count) { _, _ in loadStats() }
         }
     }
 

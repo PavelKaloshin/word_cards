@@ -26,17 +26,24 @@ actor OpenAIService {
 
     // MARK: - Translation and example
 
-    /// Returns: translation, example_cyr, example_lat, example_translation
+    /// Returns: translation, example_cyr, example_lat, example_translation, pos, verb_group
     func generateTranslationAndExample(word: String, config: AppConfig) async throws -> TranslationResult {
         let prompt = """
-        You are a Serbian language tutor. For the Serbian word "\(word)", produce:
+        You are a Serbian language tutor. For the Serbian word/phrase "\(word)", produce:
         1. A concise English translation (1–4 words; multiple meanings comma-separated).
         2. A short example sentence (5–10 words) using the word naturally, in Serbian Cyrillic.
         3. The same sentence in Serbian Latin (gajica).
         4. The English translation of the sentence.
+        5. Part of speech: one of [verb, noun, adjective, adverb, pronoun, numeral, preposition, conjunction, interjection, phrase, other].
+        6. If part of speech is "verb", classify the conjugation group based on the 1st-person singular present:
+           - "I"   for -am verbs (a-type, e.g. gledati → gledam)
+           - "II"  for -im verbs (i-type, e.g. raditi → radim)
+           - "III" for -em verbs (e-type, e.g. piti → pijem)
+           - "irregular" for fundamentally irregular verbs (e.g. biti, hteti, jesti)
+           Otherwise leave empty.
 
         Respond ONLY with strict JSON. No markdown. Schema:
-        {"translation": "...", "example_cyr": "...", "example_lat": "...", "example_translation": "..."}
+        {"translation": "...", "example_cyr": "...", "example_lat": "...", "example_translation": "...", "pos": "...", "verb_group": "..."}
         """
 
         let result = try await chatCompletion(
@@ -55,7 +62,9 @@ actor OpenAIService {
             translation: json["translation"] as? String ?? "",
             exampleCyr: json["example_cyr"] as? String ?? "",
             exampleLat: json["example_lat"] as? String ?? "",
-            exampleTranslation: json["example_translation"] as? String ?? ""
+            exampleTranslation: json["example_translation"] as? String ?? "",
+            pos: (json["pos"] as? String ?? "").lowercased(),
+            verbGroup: json["verb_group"] as? String ?? ""
         )
     }
 
@@ -101,19 +110,60 @@ actor OpenAIService {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
         let prompt = """
-        You are processing text the user copied from a chat to extract Serbian \
-        vocabulary they want to learn. The source text contains noise: sender names, \
-        timestamps in parentheses, emoji/object replacement chars, blank lines, English \
-        commentary, etc. Ignore the noise. Keep only Serbian words and phrases.
+        You are extracting INDIVIDUAL Serbian VOCABULARY WORDS (lemmas / dictionary \
+        forms) from a mixed-language paste (Serbian + Russian + English + chat noise). \
+        The user wants WORDS to memorize, NOT phrases or sentences.
 
-        Rules:
-        - Preserve the user's original Serbian script (Cyrillic or Latin/gajica).
-        - Each entry is one word or one short phrase, exactly as the user wrote it.
-        - Never translate — only include "translation" if the SOURCE text shows one \
-        (e.g. "kuća — house" or "kuća | house" lines).
-        - Don't deduplicate; keep order. The server dedupes later.
-        - Skip entries that are obviously not Serbian (English-only, numbers, names).
-        - Keep punctuation that's part of the phrase (e.g. "Kako si?").
+        For EVERY content word in the source, output ONE entry in dictionary form:
+        - nouns:      nominative singular (e.g. "grad", "kuća", "student")
+        - verbs:      infinitive ending in -ti or -ći (e.g. "čitati", "živeti", "ići")
+        - adjectives: masculine nominative singular (e.g. "lep", "dobar")
+        - adverbs:    as-is (e.g. "uvek", "danas")
+
+        Entry schema:
+        - "word": Serbian lemma (translated if source was Russian/English; lemmatized if it was a conjugated/declined form)
+        - "translation": corresponding Russian (or English) lemma. Empty string if input was already Serbian without translation.
+
+        Strict rules:
+        1. From every Russian/English sentence: translate, then split into Serbian lemmas.
+        2. From every Serbian sentence: split into Serbian lemmas.
+        3. Strip "1.", "2." numbering from list lines.
+        4. Keep order; don't deduplicate.
+        5. Serbian Latin (gajica) for translated content by default.
+
+        SKIP these:
+        - Stop-words: ja, ti, on, ona, ono, mi, vi, oni, one, sebi, sebe, svoj, ovo, ono, taj, ova, te, ti
+        - Prepositions: u, na, sa, s, o, do, od, iz, za, po, pri, pre, posle, pred, kroz, kod, među, nad, pod
+        - Conjunctions: i, a, ali, ili, jer, da, što, kako, ako, dok, kada, kad
+        - Particles/clitics: se, li, ne, će, sam (auxiliary), je (auxiliary)
+        - Numerals written as digits
+        - Noise: sender names with timestamps, ￼, blank lines, page numbers
+
+        Idiomatic multi-word phrases that work as a unit MAY be kept whole only if \
+        they're genuinely idiomatic and not decomposable (e.g. "žao mi je", "kako si", \
+        "boli me ruka"). Default to individual lemmas.
+
+        Few-shot example:
+
+        Source:
+        ```
+        1. Студент читает.
+        2. Я живу в городе.
+        3. Žao mi je.
+        Stranac
+        ```
+
+        Correct output:
+        ```
+        {"entries": [
+          {"word": "student", "translation": "студент"},
+          {"word": "čitati", "translation": "читать"},
+          {"word": "živeti", "translation": "жить"},
+          {"word": "grad", "translation": "город"},
+          {"word": "žao mi je", "translation": ""},
+          {"word": "stranac", "translation": ""}
+        ]}
+        ```
 
         Source text:
         ---
@@ -121,11 +171,12 @@ actor OpenAIService {
         ---
 
         Respond ONLY with strict JSON:
-        {"entries": [{"word": "...", "translation": "..."}, ...]}
+        {"entries": [{"word": "<Serbian lemma>", "translation": "<Russian/English lemma or empty>"}, ...]}
         """
 
+        let model = config.openaiModelExtract.isEmpty ? config.openaiModelText : config.openaiModelExtract
         let result = try await chatCompletion(
-            model: config.openaiModelText,
+            model: model,
             messages: [["role": "user", "content": prompt]],
             temperature: 0.0,
             jsonMode: true
@@ -298,6 +349,63 @@ actor OpenAIService {
 
     // MARK: - Private: Chat completion
 
+    // MARK: - Conjugations
+
+    func generateConjugations(wordLat: String, translation: String, config: AppConfig) async throws -> ConjugationTable? {
+        guard !wordLat.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+
+        let prompt = """
+        For the Serbian verb "\(wordLat)" (meaning: "\(translation.isEmpty ? "?" : translation)"), produce \
+        the PRESENT TENSE conjugation table. Return BOTH Cyrillic and Latin (gajica) \
+        spellings for every form, lowercase, no extra punctuation.
+
+        Persons:
+        - 1sg: ja (I)
+        - 2sg: ti (you, singular)
+        - 3sg: on/ona/ono (he/she/it)
+        - 1pl: mi (we)
+        - 2pl: vi (you, plural)
+        - 3pl: oni/one/ona (they)
+
+        For a multi-word phrase containing a verb, conjugate the main verb (keep \
+        auxiliary clitics/pronouns in their place, e.g. "Žao mi je" → 1sg "žao mi je", \
+        2sg "žao ti je", etc.).
+
+        Respond ONLY with strict JSON:
+        {"1sg": {"cyr": "...", "lat": "..."}, "2sg": {"cyr": "...", "lat": "..."}, \
+        "3sg": {"cyr": "...", "lat": "..."}, "1pl": {"cyr": "...", "lat": "..."}, \
+        "2pl": {"cyr": "...", "lat": "..."}, "3pl": {"cyr": "...", "lat": "..."}}
+        """
+
+        let result = try await chatCompletion(
+            model: config.openaiModelText,
+            messages: [["role": "user", "content": prompt]],
+            temperature: 0.0,
+            jsonMode: true
+        )
+
+        guard let data = result.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        func parseForm(_ key: String) -> ConjugationForm? {
+            guard let entry = json[key] as? [String: Any],
+                  let cyr = entry["cyr"] as? String, !cyr.isEmpty,
+                  let lat = entry["lat"] as? String, !lat.isEmpty else { return nil }
+            return ConjugationForm(cyr: cyr, lat: lat)
+        }
+
+        guard let sg1 = parseForm("1sg"), let sg2 = parseForm("2sg"), let sg3 = parseForm("3sg"),
+              let pl1 = parseForm("1pl"), let pl2 = parseForm("2pl"), let pl3 = parseForm("3pl") else {
+            return nil
+        }
+
+        return ConjugationTable(sg1: sg1, sg2: sg2, sg3: sg3, pl1: pl1, pl2: pl2, pl3: pl3)
+    }
+
+    // MARK: - Internal
+
     private func chatCompletion(
         model: String,
         messages: [[String: Any]],
@@ -352,6 +460,8 @@ struct TranslationResult {
     let exampleCyr: String
     let exampleLat: String
     let exampleTranslation: String
+    let pos: String
+    let verbGroup: String
 }
 
 struct ExampleResult {
