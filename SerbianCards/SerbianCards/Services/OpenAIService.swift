@@ -29,11 +29,11 @@ actor OpenAIService {
     /// Returns: translation, example_cyr, example_lat, example_translation, pos, verb_group
     func generateTranslationAndExample(word: String, config: AppConfig) async throws -> TranslationResult {
         let prompt = """
-        You are a Serbian language tutor. For the Serbian word/phrase "\(word)", produce:
-        1. A concise English translation (1–4 words; multiple meanings comma-separated).
+        You are a Serbian language tutor for a Russian-speaking student. For the Serbian word/phrase "\(word)", produce:
+        1. A concise Russian translation (1–4 words; multiple meanings comma-separated).
         2. A short example sentence (5–10 words) using the word naturally, in Serbian Cyrillic.
         3. The same sentence in Serbian Latin (gajica).
-        4. The English translation of the sentence.
+        4. The Russian translation of the sentence.
         5. Part of speech: one of [verb, noun, adjective, adverb, pronoun, numeral, preposition, conjunction, interjection, phrase, other].
         6. If part of speech is "verb", classify the conjugation group based on the 1st-person singular present:
            - "I"   for -am verbs (a-type, e.g. gledati → gledam)
@@ -78,11 +78,11 @@ actor OpenAIService {
         }
 
         let prompt = """
-        You are a Serbian language tutor. Produce a NEW short example sentence (5–10 words)
+        You are a Serbian language tutor for a Russian-speaking student. Produce a NEW short example sentence (5–10 words)
         using the Serbian word "\(word)" naturally. Different vocabulary and structure from before.\(avoid)
 
         Respond ONLY with strict JSON. Schema:
-        {"example_cyr": "...", "example_lat": "...", "example_translation": "..."}
+        {"example_cyr": "...", "example_lat": "...", "example_translation": "..."} (example_translation must be in Russian)
         """
 
         let result = try await chatCompletion(
@@ -266,29 +266,45 @@ actor OpenAIService {
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 120
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": config.openaiModelImage,
             "prompt": prompt,
-            "size": config.imageSize,
             "n": 1,
-            "response_format": "b64_json",
         ]
+        let model = config.openaiModelImage
+        if model.hasPrefix("gpt-image") {
+            body["output_format"] = "png"
+        } else {
+            body["size"] = config.imageSize
+            body["response_format"] = "b64_json"
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw OpenAIError.apiError("Image generation failed")
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OpenAIError.apiError("Image gen: no HTTP response")
+        }
+        guard httpResponse.statusCode == 200 else {
+            let errorText = String(data: data, encoding: .utf8) ?? "Unknown"
+            throw OpenAIError.apiError("Image gen HTTP \(httpResponse.statusCode): \(errorText)")
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataArray = json["data"] as? [[String: Any]],
-              let first = dataArray.first,
-              let b64 = first["b64_json"] as? String else {
-            return nil
+              let first = dataArray.first else {
+            throw OpenAIError.invalidResponse
         }
 
-        return Data(base64Encoded: b64)
+        if let b64 = first["b64_json"] as? String {
+            return Data(base64Encoded: b64)
+        }
+        if let urlStr = first["url"] as? String, let imageURL = URL(string: urlStr) {
+            let (imageData, _) = try await URLSession.shared.data(from: imageURL)
+            return imageData
+        }
+        return nil
     }
 
     // MARK: - Image evaluation

@@ -8,6 +8,7 @@ actor ImageSearchService {
     private let userAgent = "WordCards/1.0 (iOS; Serbian flashcard app)"
     private let timeout: TimeInterval = 15.0
     private let validExtensions: Set<String> = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+    private(set) var lastImageError: String?
 
     // MARK: - Public API
 
@@ -20,7 +21,7 @@ actor ImageSearchService {
         skipHashes: Set<String> = [],
         evalEnabled: Bool = true
     ) async -> String? {
-        let candidates = iterCandidateURLs(
+        let candidates = await iterCandidateURLs(
             wordSerbian: wordSerbian,
             translation: translation,
             lang: config.imageSearchLang
@@ -62,12 +63,27 @@ actor ImageSearchService {
             return path
         }
 
+        // Fallback: generate image with LLM
+        if config.imageUseLlmFallback {
+            do {
+                if let imageData = try await OpenAIService.shared.generateImage(
+                    word: wordSerbian, translation: translation, config: config
+                ) {
+                    if let path = MediaStorageService.saveImage(data: imageData, wordId: wordId, ext: "png") {
+                        return path
+                    }
+                }
+            } catch {
+                lastImageError = error.localizedDescription
+            }
+        }
+
         return nil
     }
 
     // MARK: - Candidate URL discovery
 
-    func iterCandidateURLs(wordSerbian: String, translation: String, lang: String = "en") -> [String] {
+    func iterCandidateURLs(wordSerbian: String, translation: String, lang: String = "en") async -> [String] {
         var queries: [String] = []
         if !translation.isEmpty {
             queries.append(translation)
@@ -85,20 +101,18 @@ actor ImageSearchService {
             urls.append(url)
         }
 
-        // 1. Wikipedia summary/pageimage
         for query in queries {
             let l = query == translation ? lang : "sr"
-            if let summaryURL = wikiSummaryImageSync(query: query, lang: l) {
+            if let summaryURL = await wikiSummaryImage(query: query, lang: l) {
                 push(summaryURL)
             }
-            if let pageURL = wikiPageimageSync(query: query, lang: l) {
+            if let pageURL = await wikiPageimage(query: query, lang: l) {
                 push(pageURL)
             }
         }
 
-        // 2. Commons search
         if !translation.isEmpty {
-            if let commonsURL = commonsSearchSync(query: translation) {
+            if let commonsURL = await commonsSearch(query: translation) {
                 push(commonsURL)
             }
         }
@@ -108,7 +122,7 @@ actor ImageSearchService {
 
     // MARK: - Wikipedia REST summary
 
-    private func wikiSummaryImageSync(query: String, lang: String) -> String? {
+    private func wikiSummaryImage(query: String, lang: String) async -> String? {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
         let encoded = trimmed.replacingOccurrences(of: " ", with: "_")
@@ -119,7 +133,7 @@ actor ImageSearchService {
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        guard let (data, response) = try? synchronousURLRequest(request),
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -135,7 +149,7 @@ actor ImageSearchService {
 
     // MARK: - Wikipedia pageimage API
 
-    private func wikiPageimageSync(query: String, lang: String) -> String? {
+    private func wikiPageimage(query: String, lang: String) async -> String? {
         let urlString = "https://\(lang).wikipedia.org/w/api.php"
         var components = URLComponents(string: urlString)!
         components.queryItems = [
@@ -151,7 +165,7 @@ actor ImageSearchService {
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        guard let (data, response) = try? synchronousURLRequest(request),
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let queryResult = json["query"] as? [String: Any],
@@ -171,7 +185,7 @@ actor ImageSearchService {
 
     // MARK: - Wikimedia Commons
 
-    private func commonsSearchSync(query: String) -> String? {
+    private func commonsSearch(query: String) async -> String? {
         var components = URLComponents(string: "https://commons.wikimedia.org/w/api.php")!
         components.queryItems = [
             URLQueryItem(name: "action", value: "query"),
@@ -189,7 +203,7 @@ actor ImageSearchService {
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        guard let (data, response) = try? synchronousURLRequest(request),
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let queryResult = json["query"] as? [String: Any],
@@ -241,27 +255,4 @@ actor ImageSearchService {
         return "jpg"
     }
 
-    // MARK: - Synchronous URL request helper (for candidate discovery)
-
-    private func synchronousURLRequest(_ request: URLRequest) throws -> (Data, URLResponse) {
-        let semaphore = DispatchSemaphore(value: 0)
-        var resultData: Data?
-        var resultResponse: URLResponse?
-        var resultError: Error?
-
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            resultData = data
-            resultResponse = response
-            resultError = error
-            semaphore.signal()
-        }
-        task.resume()
-        semaphore.wait()
-
-        if let error = resultError { throw error }
-        guard let data = resultData, let response = resultResponse else {
-            throw URLError(.badServerResponse)
-        }
-        return (data, response)
-    }
 }

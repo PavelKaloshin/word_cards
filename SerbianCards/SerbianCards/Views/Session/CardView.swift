@@ -82,6 +82,11 @@ struct CardView: View {
                 .padding(.horizontal)
             }
 
+            // Conjugation table for verbs
+            if let conj = word.conjugations {
+                conjugationTable(conj)
+            }
+
             Spacer()
         }
         .padding(.top, 20)
@@ -122,6 +127,35 @@ struct CardView: View {
         }
         .multilineTextAlignment(.center)
         .padding(.horizontal)
+    }
+
+    private func conjugationTable(_ conj: ConjugationTable) -> some View {
+        let rows: [(String, ConjugationForm)] = [
+            ("ја", conj.sg1), ("ти", conj.sg2), ("он/она", conj.sg3),
+            ("ми", conj.pl1), ("ви", conj.pl2), ("они", conj.pl3),
+        ]
+        return VStack(spacing: 2) {
+            ForEach(rows, id: \.0) { label, form in
+                HStack(spacing: 8) {
+                    Text(label)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 50, alignment: .trailing)
+                    switch appState.alphabet {
+                    case .cyr:
+                        Text(form.cyr).font(.caption)
+                    case .lat:
+                        Text(form.lat).font(.caption)
+                    case .both:
+                        Text(form.cyr).font(.caption)
+                        Text(form.lat).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 4)
     }
 
     private func exampleForAlphabet() -> String {

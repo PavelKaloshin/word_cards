@@ -6,8 +6,8 @@ struct SessionView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var words: [WordEntry]
 
-    // Swipe gesture state
     @State private var dragOffset: CGSize = .zero
+    @State private var isEnriching: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -100,6 +100,14 @@ struct SessionView: View {
                 isActive: appState.typingMode
             ) {
                 appState.typingMode.toggle()
+            }
+            if isEnriching {
+                ProgressView()
+                    .scaleEffect(0.7)
+            } else {
+                toolbarButton(systemImage: "arrow.triangle.2.circlepath", label: "Re-enrich") {
+                    Task { await reEnrichCurrentWord() }
+                }
             }
             Spacer()
             toolbarButton(systemImage: "xmark.circle", label: "Exit") {
@@ -263,6 +271,59 @@ struct SessionView: View {
             return SessionHUD()
         }
         return SessionService.hud(session: session)
+    }
+
+    private func reEnrichCurrentWord() async {
+        guard let word = appState.currentWord else { return }
+        isEnriching = true
+        let config = loadConfig()
+
+        do {
+            let result = try await OpenAIService.shared.generateTranslationAndExample(
+                word: word.wordCyr, config: config
+            )
+            // Only fill empty fields — don't overwrite existing translation
+            if word.translation.isEmpty { word.translation = result.translation }
+            word.exampleCyr = result.exampleCyr
+            word.exampleLat = result.exampleLat
+            word.exampleTranslation = result.exampleTranslation
+            if word.pos.isEmpty { word.pos = result.pos }
+            if word.verbGroup.isEmpty { word.verbGroup = result.verbGroup }
+
+            if result.pos == "verb" || word.pos == "verb" {
+                if let conj = try? await OpenAIService.shared.generateConjugations(
+                    wordLat: word.wordLat, translation: word.translation, config: config
+                ) {
+                    word.conjugations = conj
+                }
+            }
+        } catch {
+            appState.showToast("Enrich failed: \(error.localizedDescription)")
+        }
+
+        // Always try to find a new image on re-enrich
+        if let path = await ImageSearchService.shared.searchAndSave(
+            wordSerbian: word.wordLat,
+            translation: word.translation,
+            wordId: word.id,
+            config: config,
+            evalEnabled: config.imageEvalEnabled
+        ) {
+            if !word.imagePath.isEmpty {
+                MediaStorageService.deleteFile(path: word.imagePath)
+            }
+            word.imagePath = path
+        }
+
+        try? modelContext.save()
+        isEnriching = false
+        if word.imagePath.isEmpty {
+            let imgErr = await ImageSearchService.shared.lastImageError
+            let detail = imgErr != nil ? ": \(imgErr!)" : ""
+            appState.showToast("Re-enriched (no image\(detail))")
+        } else {
+            appState.showToast("Re-enriched")
+        }
     }
 
     private func loadConfig() -> AppConfig {
