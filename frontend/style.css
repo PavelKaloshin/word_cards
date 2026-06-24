@@ -554,12 +554,12 @@ textarea {
   resize: vertical;
 }
 
-button.primary {
+button.primary, a.primary {
   background: var(--accent); color: #0d1117; border: none;
   padding: 10px 20px; border-radius: 6px; font-weight: 600; cursor: pointer;
-  font-size: 14px;
+  font-size: 14px; text-decoration: none; display: inline-block;
 }
-button.primary:hover { filter: brightness(1.1); }
+button.primary:hover, a.primary:hover { filter: brightness(1.1); }
 button.primary:disabled { opacity: 0.5; cursor: progress; }
 
 .dropzone {

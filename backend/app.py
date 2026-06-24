@@ -4,14 +4,19 @@ FastAPI app: routes for words, sessions, settings, media.
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
+import os
+import shutil
+import tempfile
 import threading
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -758,6 +763,111 @@ def write_config(new_cfg: dict):
 
 # Serve generated images/audio
 app.mount("/media", StaticFiles(directory=str(cfg_mod.MEDIA_DIR)), name="media")
+
+
+# ---------- Export / Import ----------
+
+@app.get("/api/export")
+def export_zip(background: BackgroundTasks):
+    """Return a ZIP bundle importable by the native Swift/macOS app.
+
+    Images are resized to JPEG (max 800px, quality 85) to keep the archive small.
+    The ZIP is written to a temp file so large libraries don't exhaust memory.
+    """
+    import json as _json
+    from PIL import Image as PilImage
+
+    words_raw = words_db.all()
+    sessions_raw = sessions_db.recent(1000)
+
+    # Build camelCase words list
+    export_words = []
+    image_entries: list[tuple[str, str]] = []  # (abs_src_path, zip_filename)
+
+    for w in words_raw:
+        img_abs = w.get("image_path", "")
+        img_p = Path(img_abs) if img_abs else None
+        img_filename = (img_p.stem + ".jpg") if img_p else ""
+        audio_abs = w.get("audio_path", "")
+        audio_filename = Path(audio_abs).name if audio_abs else ""
+
+        if img_p and img_p.exists():
+            image_entries.append((str(img_p), img_filename))
+
+        conj_raw = w.get("conjugations")
+        conj_out = None
+        if conj_raw and isinstance(conj_raw, dict):
+            conj_out = {
+                k: {"cyr": conj_raw[k].get("cyr", ""), "lat": conj_raw[k].get("lat", "")}
+                for k in ("sg1", "sg2", "sg3", "pl1", "pl2", "pl3")
+                if k in conj_raw
+            }
+
+        export_words.append({
+            "id": w["id"],
+            "wordCyr": w.get("word_cyr", ""),
+            "wordLat": w.get("word_lat", ""),
+            "translation": w.get("translation", ""),
+            "exampleCyr": w.get("example_cyr", ""),
+            "exampleLat": w.get("example_lat", ""),
+            "exampleTranslation": w.get("example_translation", ""),
+            "imagePath": img_filename,
+            "audioPath": audio_filename,
+            "imageHashHistory": w.get("image_hash_history", []),
+            "note": w.get("note", ""),
+            "createdAt": w.get("created_at", ""),
+            "lastSeenAt": w.get("last_seen_at"),
+            "lastCorrectAt": w.get("last_correct_at"),
+            "streak": w.get("streak", 0),
+            "totalGood": w.get("total_good", 0),
+            "totalHard": w.get("total_hard", 0),
+            "totalAgain": w.get("total_again", 0),
+            "forgetCount": w.get("forget_count", 0),
+            "history": [
+                {"ts": h.get("ts", ""), "grade": h.get("grade", ""), "direction": h.get("direction", "")}
+                for h in (w.get("history") or [])
+            ],
+            "pos": w.get("pos", ""),
+            "verbGroup": w.get("verb_group", ""),
+            "conjugations": conj_out,
+        })
+
+    export_sessions = [
+        {
+            "id": s["id"], "mode": s["mode"],
+            "startedAt": s.get("started_at", ""), "endedAt": s.get("ended_at"),
+            "results": s.get("results", []), "summary": s.get("summary", {}),
+        }
+        for s in sessions_raw
+    ]
+
+    # Write ZIP to a temp file (avoids holding 500 MB in memory)
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
+    try:
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("words.json", _json.dumps(export_words, ensure_ascii=False, indent=2))
+            zf.writestr("sessions.json", _json.dumps(export_sessions, ensure_ascii=False, indent=2))
+
+            for src, fname in image_entries:
+                try:
+                    img = PilImage.open(src).convert("RGB")
+                    img.thumbnail((800, 800), PilImage.LANCZOS)
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=85, optimize=True)
+                    zf.writestr(f"media/images/{fname}", buf.getvalue())
+                except Exception:
+                    pass  # skip unreadable images silently
+    except Exception as exc:
+        os.unlink(tmp.name)
+        raise HTTPException(500, f"Export failed: {exc}")
+
+    background.add_task(os.unlink, tmp.name)
+    return FileResponse(
+        tmp.name,
+        media_type="application/zip",
+        filename="SerbianCards-Export.zip",
+    )
 
 
 # ---------- Frontend (static) ----------
